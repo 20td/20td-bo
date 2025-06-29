@@ -9,7 +9,7 @@ const httpServer = createServer(app)
 // Socket.IO Server with CORS configuration
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -18,67 +18,40 @@ const io = new Server(httpServer, {
 
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
     credentials: true,
   }),
 )
 app.use(express.json())
 
 // In-memory storage for sessions and users
-const chatSessions = new Map()
-const connectedUsers = new Map()
-const ownerSockets = new Set()
+const sessions = new Map()
+const messages = new Map()
 
 // Utility functions
-const generateSessionId = () => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+const generateSessionId = () => Math.random().toString(36).substring(2, 8).toUpperCase()
 
-const createMessage = (sender, text, role = "user") => ({
-  id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-  sender,
-  text,
-  timestamp: new Date().toISOString(),
-  role,
-  readByOwner: role === "owner",
-})
-
-const getSessionData = (sessionId) => {
-  const session = chatSessions.get(sessionId)
-  if (!session) return null
-
-  return {
-    sessionId,
-    userName: session.userName,
-    isActive: session.connectedUsers.size > 0,
-    lastActivity: session.lastActivity,
-    unreadCount: session.messages.filter((msg) => !msg.readByOwner && msg.role !== "owner").length,
-    lastMessage: session.messages[session.messages.length - 1] || null,
-    messageCount: session.messages.length,
+const getOrCreateSession = (sessionId) => {
+  if (!sessions.has(sessionId)) {
+    sessions.set(sessionId, {
+      id: sessionId,
+      users: [],
+      messageCount: 0,
+      lastActivity: new Date().toISOString(),
+      unreadCount: 0,
+    })
+    messages.set(sessionId, [])
   }
+  return sessions.get(sessionId)
 }
 
-// REST API Endpoints
-app.get("/api/sessions", (req, res) => {
-  const sessions = Array.from(chatSessions.keys())
-    .map((sessionId) => getSessionData(sessionId))
-    .filter(Boolean)
-  res.json(sessions)
-})
-
-app.get("/api/sessions/:sessionId", (req, res) => {
-  const sessionData = getSessionData(req.params.sessionId)
-  if (!sessionData) {
-    return res.status(404).json({ error: "Session not found" })
+const updateSessionActivity = (sessionId) => {
+  const session = sessions.get(sessionId)
+  if (session) {
+    session.lastActivity = new Date().toISOString()
+    sessions.set(sessionId, session)
   }
-  res.json(sessionData)
-})
-
-app.get("/api/sessions/:sessionId/messages", (req, res) => {
-  const session = chatSessions.get(req.params.sessionId)
-  if (!session) {
-    return res.status(404).json({ error: "Session not found" })
-  }
-  res.json(session.messages)
-})
+}
 
 // Socket.IO Event Handlers
 io.on("connection", (socket) => {
@@ -88,205 +61,163 @@ io.on("connection", (socket) => {
   socket.on("join-session", ({ sessionId, userName, role = "user" }) => {
     console.log(`👤 ${userName} (${role}) joining session: ${sessionId}`)
 
-    // Store user info
-    connectedUsers.set(socket.id, { sessionId, userName, role })
+    // Create session if it doesn't exist
+    const session = getOrCreateSession(sessionId)
 
-    // Track owner sockets
-    if (role === "owner") {
-      ownerSockets.add(socket.id)
+    // Add user to session if not already present
+    if (!session.users.includes(userName)) {
+      session.users.push(userName)
     }
 
     // Join the socket room
     socket.join(sessionId)
+    socket.sessionId = sessionId
+    socket.userName = userName
+    socket.role = role
 
-    // Initialize session if it doesn't exist
-    if (!chatSessions.has(sessionId)) {
-      chatSessions.set(sessionId, {
-        sessionId,
-        userName: role === "owner" ? "Support Team" : userName,
-        messages: [],
-        connectedUsers: new Set(),
-        lastActivity: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
-      })
+    // Update session activity
+    updateSessionActivity(sessionId)
+
+    // Send message history to the user
+    const sessionMessages = messages.get(sessionId) || []
+    socket.emit("message-history", sessionMessages)
+
+    // Notify others in the session
+    socket.to(sessionId).emit("user-joined", { userName, role })
+
+    // Send updated session info to owners
+    io.emit("session-updated", session)
+
+    // Send system message
+    const systemMessage = {
+      id: Date.now(),
+      sender: "System",
+      text: `${userName} joined the chat`,
+      timestamp: new Date().toISOString(),
+      role: "system",
     }
 
-    const session = chatSessions.get(sessionId)
-    session.connectedUsers.add(socket.id)
-    session.lastActivity = new Date().toISOString()
+    const sessionMessagesList = messages.get(sessionId)
+    sessionMessagesList.push(systemMessage)
+    messages.set(sessionId, sessionMessagesList)
 
-    // Send message history to the joining user
-    socket.emit("message-history", session.messages)
-
-    // Create and broadcast join message
-    const joinMessage = createMessage("System", `${userName} joined the chat`, "system")
-    session.messages.push(joinMessage)
-
-    io.to(sessionId).emit("new-message", joinMessage)
-
-    // Notify all owners about session update
-    const sessionData = getSessionData(sessionId)
-    ownerSockets.forEach((ownerSocketId) => {
-      io.to(ownerSocketId).emit("session-updated", sessionData)
-    })
-
-    // Send current online users in session
-    const onlineUsers = Array.from(session.connectedUsers)
-      .map((socketId) => {
-        const user = connectedUsers.get(socketId)
-        return user ? { socketId, userName: user.userName, role: user.role } : null
-      })
-      .filter(Boolean)
-
-    io.to(sessionId).emit("users-online", onlineUsers)
-
-    console.log(`✅ ${userName} successfully joined session ${sessionId}`)
+    io.to(sessionId).emit("new-message", systemMessage)
   })
 
   // Handle sending messages
   socket.on("send-message", ({ sessionId, message, sender, role = "user" }) => {
-    const session = chatSessions.get(sessionId)
-    if (!session) {
-      socket.emit("error", { message: "Session not found" })
-      return
+    console.log(`💬 Message from ${sender} in session ${sessionId}: ${message}`)
+
+    const newMessage = {
+      id: Date.now(),
+      sender,
+      text: message,
+      timestamp: new Date().toISOString(),
+      role,
+      readByOwner: role === "owner",
     }
 
-    // Create new message
-    const newMessage = createMessage(sender, message, role)
-    session.messages.push(newMessage)
-    session.lastActivity = new Date().toISOString()
+    // Store message
+    const sessionMessages = messages.get(sessionId) || []
+    sessionMessages.push(newMessage)
+    messages.set(sessionId, sessionMessages)
+
+    // Update session
+    const session = sessions.get(sessionId)
+    if (session) {
+      session.messageCount++
+      if (role === "user") {
+        session.unreadCount++
+      }
+      updateSessionActivity(sessionId)
+      sessions.set(sessionId, session)
+
+      // Notify owners of session update
+      io.emit("session-updated", session)
+    }
 
     // Broadcast message to all users in the session
     io.to(sessionId).emit("new-message", newMessage)
-
-    // Update session data for owners
-    const sessionData = getSessionData(sessionId)
-    ownerSockets.forEach((ownerSocketId) => {
-      io.to(ownerSocketId).emit("session-updated", sessionData)
-    })
-
-    // Send notification to owners if message is from user
-    if (role !== "owner") {
-      ownerSockets.forEach((ownerSocketId) => {
-        io.to(ownerSocketId).emit("new-message-notification", {
-          sessionId,
-          message: newMessage,
-          sessionData,
-        })
-      })
-    }
-
-    console.log(`💬 Message sent in ${sessionId} by ${sender}: ${message}`)
   })
 
   // Handle typing indicators
-  socket.on("typing-start", ({ sessionId, userName }) => {
-    socket.to(sessionId).emit("user-typing", { userName, isTyping: true })
+  socket.on("typing", ({ sessionId, userName, isTyping }) => {
+    socket.to(sessionId).emit("user-typing", { userName, isTyping })
   })
 
-  socket.on("typing-stop", ({ sessionId, userName }) => {
-    socket.to(sessionId).emit("user-typing", { userName, isTyping: false })
-  })
-
-  // Handle marking messages as read by owner
-  socket.on("mark-messages-read", ({ sessionId }) => {
-    const session = chatSessions.get(sessionId)
-    if (!session) return
-
-    // Mark all non-owner messages as read
-    session.messages.forEach((msg) => {
-      if (msg.role !== "owner") {
-        msg.readByOwner = true
-      }
-    })
-
-    // Update session data for all owners
-    const sessionData = getSessionData(sessionId)
-    ownerSockets.forEach((ownerSocketId) => {
-      io.to(ownerSocketId).emit("session-updated", sessionData)
-    })
-
-    console.log(`📖 Messages marked as read in session ${sessionId}`)
-  })
-
-  // Handle owner joining all sessions (for dashboard)
-  socket.on("owner-join-all-sessions", () => {
-    const userInfo = connectedUsers.get(socket.id)
-    if (userInfo && userInfo.role === "owner") {
-      // Join all existing sessions
-      chatSessions.forEach((session, sessionId) => {
-        socket.join(sessionId)
-      })
-
-      // Send all sessions data
-      const allSessions = Array.from(chatSessions.keys())
-        .map((sessionId) => getSessionData(sessionId))
-        .filter(Boolean)
-      socket.emit("all-sessions", allSessions)
-
-      console.log(`👑 Owner ${userInfo.userName} joined all sessions`)
-    }
-  })
-
-  // Handle getting session list
+  // Get all sessions (for owner dashboard)
   socket.on("get-sessions", () => {
-    const sessions = Array.from(chatSessions.keys())
-      .map((sessionId) => getSessionData(sessionId))
-      .filter(Boolean)
-    socket.emit("sessions-list", sessions)
+    const sessionsList = Array.from(sessions.values())
+    socket.emit("sessions-list", sessionsList)
+  })
+
+  // Mark messages as read
+  socket.on("mark-as-read", ({ sessionId }) => {
+    const session = sessions.get(sessionId)
+    if (session) {
+      session.unreadCount = 0
+      sessions.set(sessionId, session)
+      io.emit("session-updated", session)
+    }
   })
 
   // Handle disconnection
   socket.on("disconnect", () => {
     console.log(`🔌 User disconnected: ${socket.id}`)
 
-    const userInfo = connectedUsers.get(socket.id)
-    if (userInfo) {
-      const { sessionId, userName, role } = userInfo
-      const session = chatSessions.get(sessionId)
-
+    if (socket.sessionId && socket.userName) {
+      const session = sessions.get(socket.sessionId)
       if (session) {
         // Remove user from session
-        session.connectedUsers.delete(socket.id)
+        session.users = session.users.filter((user) => user !== socket.userName)
+        sessions.set(socket.sessionId, session)
 
-        // Create leave message
-        const leaveMessage = createMessage("System", `${userName} left the chat`, "system")
-        session.messages.push(leaveMessage)
-        session.lastActivity = new Date().toISOString()
-
-        // Broadcast leave message
-        socket.to(sessionId).emit("new-message", leaveMessage)
-
-        // Update online users
-        const onlineUsers = Array.from(session.connectedUsers)
-          .map((socketId) => {
-            const user = connectedUsers.get(socketId)
-            return user ? { socketId, userName: user.userName, role: user.role } : null
-          })
-          .filter(Boolean)
-
-        io.to(sessionId).emit("users-online", onlineUsers)
-
-        // Update session data for owners
-        const sessionData = getSessionData(sessionId)
-        ownerSockets.forEach((ownerSocketId) => {
-          io.to(ownerSocketId).emit("session-updated", sessionData)
+        // Notify others in the session
+        socket.to(socket.sessionId).emit("user-left", {
+          userName: socket.userName,
+          role: socket.role,
         })
-      }
 
-      // Remove from tracking
-      connectedUsers.delete(socket.id)
-      if (role === "owner") {
-        ownerSockets.delete(socket.id)
-      }
+        // Send system message
+        const systemMessage = {
+          id: Date.now(),
+          sender: "System",
+          text: `${socket.userName} left the chat`,
+          timestamp: new Date().toISOString(),
+          role: "system",
+        }
 
-      console.log(`👋 ${userName} (${role}) left session ${sessionId}`)
+        const sessionMessages = messages.get(socket.sessionId) || []
+        sessionMessages.push(systemMessage)
+        messages.set(socket.sessionId, sessionMessages)
+
+        socket.to(socket.sessionId).emit("new-message", systemMessage)
+
+        // Update session info for owners
+        io.emit("session-updated", session)
+      }
     }
   })
+})
 
-  // Handle errors
-  socket.on("error", (error) => {
-    console.error(`❌ Socket error for ${socket.id}:`, error)
+// REST API Endpoints
+app.get("/api/sessions", (req, res) => {
+  const sessionsList = Array.from(sessions.values())
+  res.json(sessionsList)
+})
+
+app.get("/api/sessions/:sessionId/messages", (req, res) => {
+  const { sessionId } = req.params
+  const sessionMessages = messages.get(sessionId) || []
+  res.json(sessionMessages)
+})
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    sessions: sessions.size,
+    totalMessages: Array.from(messages.values()).reduce((sum, msgs) => sum + msgs.length, 0),
   })
 })
 
@@ -300,8 +231,7 @@ const PORT = process.env.PORT || 5000
 httpServer.listen(PORT, () => {
   console.log(`🚀 Chat server running on port ${PORT}`)
   console.log(`📡 Socket.IO server ready for connections`)
-  console.log(`🌐 API endpoints available at http://localhost:${PORT}/api`)
-  console.log(`🔗 Frontend should connect to http://localhost:${PORT}`)
+  console.log(`🌐 Health check available at http://localhost:${PORT}/health`)
 })
 
 // Graceful shutdown

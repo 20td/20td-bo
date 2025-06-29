@@ -6,12 +6,19 @@ import { io, type Socket } from "socket.io-client"
 
 interface SocketContextType {
   socket: Socket | null
+  isConnected: boolean
 }
 
-const SocketContext = createContext<SocketContextType>({ socket: null })
+const SocketContext = createContext<SocketContextType>({
+  socket: null,
+  isConnected: false,
+})
 
 export const useSocket = () => {
   const context = useContext(SocketContext)
+  if (!context) {
+    throw new Error("useSocket must be used within a SocketProvider")
+  }
   return context.socket
 }
 
@@ -21,26 +28,32 @@ interface SocketProviderProps {
 
 export const SocketProvider: React.FC<SocketProviderProps> = ({ children }) => {
   const [socket, setSocket] = useState<Socket | null>(null)
+  const [isConnected, setIsConnected] = useState(false)
 
   useEffect(() => {
-    const newSocket = io("http://localhost:5000", {
-      transports: ["websocket", "polling"],
-    })
+    // Only initialize socket on client side
+    if (typeof window !== "undefined") {
+      const socketInstance = io(process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:5000", {
+        transports: ["websocket", "polling"],
+      })
 
-    newSocket.on("connect", () => {
-      console.log("Connected to server")
-    })
+      socketInstance.on("connect", () => {
+        setIsConnected(true)
+        console.log("Connected to server")
+      })
 
-    newSocket.on("disconnect", () => {
-      console.log("Disconnected from server")
-    })
+      socketInstance.on("disconnect", () => {
+        setIsConnected(false)
+        console.log("Disconnected from server")
+      })
 
-    setSocket(newSocket)
+      setSocket(socketInstance)
 
-    return () => {
-      newSocket.close()
+      return () => {
+        socketInstance.disconnect()
+      }
     }
   }, [])
 
-  return <SocketContext.Provider value={{ socket }}>{children}</SocketContext.Provider>
+  return <SocketContext.Provider value={{ socket, isConnected }}>{children}</SocketContext.Provider>
 }
