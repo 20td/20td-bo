@@ -1,0 +1,37 @@
+{
+  "name": "chat-app-quick-setup",
+  "description": "Quick setup configuration for the chat application",
+  "setup": {
+    "backend": {
+      "folder": "server",
+      "files": ["package.json", "server.js"],
+      "commands": ["npm install", "npm start"],
+      "port": 5000
+    },
+    "frontend": {
+      "folder": ".",
+      "files": [
+        "package.json",
+        "src/App.tsx",
+        "src/index.tsx",
+        "src/index.css",
+        "src/components/LoginPage.tsx",
+        "src/components/Chat.tsx",
+        "src/components/OwnerDashboard.tsx",
+        "src/components/UserChat.tsx",
+        "src/hooks/useSocket.tsx",
+        "public/index.html"
+      ],
+      "commands": ["npm install", "npm start"],
+      "port": 3000
+    }
+  },
+  "testing": {
+    "steps": [
+      "Open http://localhost:3000 in two browser tabs",
+      "Tab 1: Login as 'Owner' with any name",
+      "Tab 2: Login as 'User' with any name",
+      "Start chatting to test real-time messaging"
+    ]
+  }
+}
