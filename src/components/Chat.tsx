@@ -1,11 +1,9 @@
 "use client"
 
 import type React from "react"
-
 import { useState, useEffect, useRef } from "react"
-import { Send, User, Crown, Users, Circle } from "lucide-react"
+import { Send, User, Crown, Users, Circle, MessageCircle } from "lucide-react"
 import type { Socket } from "socket.io-client"
-import MessageCircle from "lucide-react" // Declared the MessageCircle variable
 
 interface Message {
   id: string
@@ -117,6 +115,30 @@ const Chat: React.FC<ChatProps> = ({ socket, sessionId, userName, role, onMarkAs
   }, [socket, sessionId, userName, role, onMarkAsRead])
 
   useEffect(() => {
+    // Simulate connection for demo
+    setIsConnected(true)
+
+    // Add some demo messages
+    const demoMessages: Message[] = [
+      {
+        id: "1",
+        sender: "System",
+        text: "Welcome to the chat!",
+        timestamp: new Date().toISOString(),
+        role: "system",
+      },
+      {
+        id: "2",
+        sender: role === "owner" ? "User" : "Owner",
+        text: "Hello! How can I help you today?",
+        timestamp: new Date(Date.now() - 60000).toISOString(),
+        role: role === "owner" ? "user" : "owner",
+      },
+    ]
+    setMessages(demoMessages)
+  }, [role])
+
+  useEffect(() => {
     scrollToBottom()
   }, [messages])
 
@@ -137,6 +159,20 @@ const Chat: React.FC<ChatProps> = ({ socket, sessionId, userName, role, onMarkAs
 
     setNewMessage("")
     handleStopTyping()
+
+    // Simulate response for demo
+    if (role === "user") {
+      setTimeout(() => {
+        const response: Message = {
+          id: (Date.now() + 1).toString(),
+          sender: "Support",
+          text: "Thanks for your message! How can I assist you further?",
+          timestamp: new Date().toISOString(),
+          role: "owner",
+        }
+        setMessages((prev) => [...prev, response])
+      }, 1000)
+    }
   }
 
   const handleTyping = (value: string) => {
@@ -194,7 +230,7 @@ const Chat: React.FC<ChatProps> = ({ socket, sessionId, userName, role, onMarkAs
       <div className="bg-white border-b border-gray-200 p-4">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="font-semibold text-gray-900">Session: {sessionId.split("_")[1]}</h3>
+            <h3 className="font-semibold text-gray-900">Session: {sessionId.split("_")[1] || sessionId}</h3>
             <div className="flex items-center space-x-2 mt-1">
               <div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500" : "bg-red-500"}`}></div>
               <span className="text-sm text-gray-500">{isConnected ? "Connected" : "Disconnected"}</span>

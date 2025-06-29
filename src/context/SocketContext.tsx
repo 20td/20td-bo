@@ -19,7 +19,7 @@ export const useSocket = () => {
   if (!context) {
     throw new Error("useSocket must be used within a SocketProvider")
   }
-  return context.socket
+  return context
 }
 
 interface SocketProviderProps {
@@ -32,26 +32,35 @@ export const SocketProvider: React.FC<SocketProviderProps> = ({ children }) => {
 
   useEffect(() => {
     // Only initialize socket on client side
-    if (typeof window !== "undefined") {
-      const socketInstance = io(process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:5000", {
-        transports: ["websocket", "polling"],
-      })
+    if (typeof window === "undefined") return
 
-      socketInstance.on("connect", () => {
-        setIsConnected(true)
-        console.log("Connected to server")
-      })
+    const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:5000"
 
-      socketInstance.on("disconnect", () => {
-        setIsConnected(false)
-        console.log("Disconnected from server")
-      })
+    const newSocket = io(serverUrl, {
+      transports: ["websocket", "polling"],
+      timeout: 20000,
+      forceNew: true,
+    })
 
-      setSocket(socketInstance)
+    newSocket.on("connect", () => {
+      console.log("Connected to server")
+      setIsConnected(true)
+    })
 
-      return () => {
-        socketInstance.disconnect()
-      }
+    newSocket.on("disconnect", () => {
+      console.log("Disconnected from server")
+      setIsConnected(false)
+    })
+
+    newSocket.on("connect_error", (error) => {
+      console.error("Connection error:", error)
+      setIsConnected(false)
+    })
+
+    setSocket(newSocket)
+
+    return () => {
+      newSocket.close()
     }
   }, [])
 

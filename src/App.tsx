@@ -1,21 +1,20 @@
 "use client"
 
-import type React from "react"
 import { useState } from "react"
 import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom"
 import LoginPage from "./components/LoginPage"
 import OwnerDashboard from "./components/OwnerDashboard"
 import UserChat from "./components/UserChat"
-import { SocketProvider } from "./context/SocketContext"
 
 interface User {
   name: string
-  role: "user" | "owner"
+  role: string
   sessionId?: string
 }
 
-const App: React.FC = () => {
+function App() {
   const [user, setUser] = useState<User | null>(null)
+  const [isConnected] = useState(true) // For demo purposes
 
   const handleLogin = (userData: User) => {
     setUser(userData)
@@ -25,30 +24,45 @@ const App: React.FC = () => {
     setUser(null)
   }
 
-  if (!user) {
-    return <LoginPage onLogin={handleLogin} />
-  }
-
   return (
-    <SocketProvider>
+    <div className="min-h-screen bg-gray-100">
       <Router>
-        <div className="min-h-screen bg-gray-100">
-          <Routes>
-            <Route
-              path="/"
-              element={
-                user.role === "owner" ? (
-                  <OwnerDashboard userName={user.name} onLogout={handleLogout} />
-                ) : (
-                  <UserChat userName={user.name} sessionId={user.sessionId || ""} onLogout={handleLogout} />
-                )
-              }
-            />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </div>
+        <Routes>
+          <Route
+            path="/"
+            element={
+              !user ? (
+                <LoginPage onLogin={handleLogin} isConnected={isConnected} />
+              ) : user.role === "owner" ? (
+                <Navigate to="/dashboard" replace />
+              ) : (
+                <Navigate to="/chat" replace />
+              )
+            }
+          />
+          <Route
+            path="/dashboard"
+            element={
+              user?.role === "owner" ? (
+                <OwnerDashboard user={user} onLogout={handleLogout} isConnected={isConnected} />
+              ) : (
+                <Navigate to="/" replace />
+              )
+            }
+          />
+          <Route
+            path="/chat"
+            element={
+              user?.role === "user" && user.sessionId ? (
+                <UserChat user={user} onLogout={handleLogout} isConnected={isConnected} />
+              ) : (
+                <Navigate to="/" replace />
+              )
+            }
+          />
+        </Routes>
       </Router>
-    </SocketProvider>
+    </div>
   )
 }
 

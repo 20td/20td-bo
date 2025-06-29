@@ -1,21 +1,21 @@
 const express = require("express")
-const { createServer } = require("http")
-const { Server } = require("socket.io")
+const http = require("http")
+const socketIo = require("socket.io")
 const cors = require("cors")
 
 const app = express()
-const httpServer = createServer(app)
+const server = http.createServer(app)
 
-// Socket.IO Server with CORS configuration
-const io = new Server(httpServer, {
+// Configure CORS for Socket.IO
+const io = socketIo(server, {
   cors: {
     origin: process.env.CLIENT_URL || "http://localhost:3000",
     methods: ["GET", "POST"],
     credentials: true,
   },
-  transports: ["websocket", "polling"],
 })
 
+// Middleware
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
@@ -24,92 +24,64 @@ app.use(
 )
 app.use(express.json())
 
-// In-memory storage for sessions and users
+// In-memory storage for demo
 const sessions = new Map()
 const messages = new Map()
+const users = new Map()
 
-// Utility functions
-const generateSessionId = () => Math.random().toString(36).substring(2, 8).toUpperCase()
-
-const getOrCreateSession = (sessionId) => {
-  if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, {
-      id: sessionId,
-      users: [],
-      messageCount: 0,
-      lastActivity: new Date().toISOString(),
-      unreadCount: 0,
-    })
-    messages.set(sessionId, [])
-  }
-  return sessions.get(sessionId)
-}
-
-const updateSessionActivity = (sessionId) => {
-  const session = sessions.get(sessionId)
-  if (session) {
-    session.lastActivity = new Date().toISOString()
-    sessions.set(sessionId, session)
-  }
-}
-
-// Socket.IO Event Handlers
+// Socket.IO connection handling
 io.on("connection", (socket) => {
-  console.log(`🔌 User connected: ${socket.id}`)
+  console.log("User connected:", socket.id)
 
-  // Handle user joining a session
-  socket.on("join-session", ({ sessionId, userName, role = "user" }) => {
-    console.log(`👤 ${userName} (${role}) joining session: ${sessionId}`)
+  // Join session
+  socket.on("join-session", ({ sessionId, userName, role }) => {
+    console.log(`${userName} (${role}) joined session: ${sessionId}`)
 
-    // Create session if it doesn't exist
-    const session = getOrCreateSession(sessionId)
-
-    // Add user to session if not already present
-    if (!session.users.includes(userName)) {
-      session.users.push(userName)
-    }
-
-    // Join the socket room
     socket.join(sessionId)
     socket.sessionId = sessionId
     socket.userName = userName
     socket.role = role
 
-    // Update session activity
-    updateSessionActivity(sessionId)
+    // Store user info
+    users.set(socket.id, { userName, role, sessionId })
 
-    // Send message history to the user
+    // Initialize session if it doesn't exist
+    if (!sessions.has(sessionId)) {
+      sessions.set(sessionId, {
+        sessionId,
+        userName: role === "user" ? userName : "Multiple Users",
+        isActive: true,
+        lastActivity: new Date().toISOString(),
+        unreadCount: 0,
+        messageCount: 0,
+        users: [],
+      })
+      messages.set(sessionId, [])
+    }
+
+    // Update session
+    const session = sessions.get(sessionId)
+    if (!session.users.includes(userName)) {
+      session.users.push(userName)
+    }
+    session.isActive = true
+    session.lastActivity = new Date().toISOString()
+
+    // Send message history
     const sessionMessages = messages.get(sessionId) || []
     socket.emit("message-history", sessionMessages)
 
-    // Notify others in the session
+    // Notify others in session
     socket.to(sessionId).emit("user-joined", { userName, role })
 
-    // Send updated session info to owners
+    // Update session for owners
     io.emit("session-updated", session)
-
-    // Send system message
-    const systemMessage = {
-      id: Date.now(),
-      sender: "System",
-      text: `${userName} joined the chat`,
-      timestamp: new Date().toISOString(),
-      role: "system",
-    }
-
-    const sessionMessagesList = messages.get(sessionId)
-    sessionMessagesList.push(systemMessage)
-    messages.set(sessionId, sessionMessagesList)
-
-    io.to(sessionId).emit("new-message", systemMessage)
   })
 
-  // Handle sending messages
-  socket.on("send-message", ({ sessionId, message, sender, role = "user" }) => {
-    console.log(`💬 Message from ${sender} in session ${sessionId}: ${message}`)
-
-    const newMessage = {
-      id: Date.now(),
+  // Send message
+  socket.on("send-message", ({ sessionId, message, sender, role }) => {
+    const messageObj = {
+      id: Date.now().toString(),
       sender,
       text: message,
       timestamp: new Date().toISOString(),
@@ -118,89 +90,101 @@ io.on("connection", (socket) => {
     }
 
     // Store message
-    const sessionMessages = messages.get(sessionId) || []
-    sessionMessages.push(newMessage)
-    messages.set(sessionId, sessionMessages)
+    if (!messages.has(sessionId)) {
+      messages.set(sessionId, [])
+    }
+    messages.get(sessionId).push(messageObj)
 
     // Update session
-    const session = sessions.get(sessionId)
-    if (session) {
+    if (sessions.has(sessionId)) {
+      const session = sessions.get(sessionId)
       session.messageCount++
+      session.lastActivity = new Date().toISOString()
+      session.lastMessage = {
+        sender,
+        text: message,
+        timestamp: messageObj.timestamp,
+        role,
+      }
+
       if (role === "user") {
         session.unreadCount++
       }
-      updateSessionActivity(sessionId)
-      sessions.set(sessionId, session)
 
-      // Notify owners of session update
+      sessions.set(sessionId, session)
       io.emit("session-updated", session)
     }
 
-    // Broadcast message to all users in the session
-    io.to(sessionId).emit("new-message", newMessage)
+    // Send message to all users in session
+    io.to(sessionId).emit("new-message", messageObj)
+
+    // Notify owners of new message
+    if (role === "user") {
+      socket.broadcast.emit("new-message-notification", {
+        sessionId,
+        message: messageObj,
+        sessionData: sessions.get(sessionId),
+      })
+    }
   })
 
-  // Handle typing indicators
-  socket.on("typing", ({ sessionId, userName, isTyping }) => {
-    socket.to(sessionId).emit("user-typing", { userName, isTyping })
+  // Typing indicators
+  socket.on("typing-start", ({ sessionId, userName }) => {
+    socket.to(sessionId).emit("user-typing", { userName, isTyping: true })
   })
 
-  // Get all sessions (for owner dashboard)
-  socket.on("get-sessions", () => {
-    const sessionsList = Array.from(sessions.values())
-    socket.emit("sessions-list", sessionsList)
+  socket.on("typing-stop", ({ sessionId, userName }) => {
+    socket.to(sessionId).emit("user-typing", { userName, isTyping: false })
   })
 
   // Mark messages as read
-  socket.on("mark-as-read", ({ sessionId }) => {
-    const session = sessions.get(sessionId)
-    if (session) {
+  socket.on("mark-messages-read", ({ sessionId }) => {
+    if (sessions.has(sessionId)) {
+      const session = sessions.get(sessionId)
       session.unreadCount = 0
       sessions.set(sessionId, session)
       io.emit("session-updated", session)
     }
   })
 
-  // Handle disconnection
+  // Get sessions (for owner dashboard)
+  socket.on("get-sessions", () => {
+    const sessionsList = Array.from(sessions.values())
+    socket.emit("sessions-list", sessionsList)
+  })
+
+  // Owner join all sessions
+  socket.on("owner-join-all-sessions", () => {
+    sessions.forEach((session) => {
+      socket.join(session.sessionId)
+    })
+  })
+
+  // Handle disconnect
   socket.on("disconnect", () => {
-    console.log(`🔌 User disconnected: ${socket.id}`)
+    console.log("User disconnected:", socket.id)
 
-    if (socket.sessionId && socket.userName) {
-      const session = sessions.get(socket.sessionId)
-      if (session) {
-        // Remove user from session
-        session.users = session.users.filter((user) => user !== socket.userName)
-        sessions.set(socket.sessionId, session)
+    const user = users.get(socket.id)
+    if (user && user.sessionId) {
+      // Update session
+      if (sessions.has(user.sessionId)) {
+        const session = sessions.get(user.sessionId)
+        session.users = session.users.filter((u) => u !== user.userName)
+        session.isActive = session.users.length > 0
+        session.lastActivity = new Date().toISOString()
+        sessions.set(user.sessionId, session)
 
-        // Notify others in the session
-        socket.to(socket.sessionId).emit("user-left", {
-          userName: socket.userName,
-          role: socket.role,
-        })
-
-        // Send system message
-        const systemMessage = {
-          id: Date.now(),
-          sender: "System",
-          text: `${socket.userName} left the chat`,
-          timestamp: new Date().toISOString(),
-          role: "system",
-        }
-
-        const sessionMessages = messages.get(socket.sessionId) || []
-        sessionMessages.push(systemMessage)
-        messages.set(socket.sessionId, sessionMessages)
-
-        socket.to(socket.sessionId).emit("new-message", systemMessage)
-
-        // Update session info for owners
+        // Notify others
+        socket.to(user.sessionId).emit("user-left", { userName: user.userName })
         io.emit("session-updated", session)
       }
     }
+
+    users.delete(socket.id)
   })
 })
 
-// REST API Endpoints
+// REST API endpoints
 app.get("/api/sessions", (req, res) => {
   const sessionsList = Array.from(sessions.values())
   res.json(sessionsList)
@@ -212,41 +196,23 @@ app.get("/api/sessions/:sessionId/messages", (req, res) => {
   res.json(sessionMessages)
 })
 
+// Health check
 app.get("/health", (req, res) => {
-  res.json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    sessions: sessions.size,
-    totalMessages: Array.from(messages.values()).reduce((sum, msgs) => sum + msgs.length, 0),
-  })
+  res.json({ status: "OK", timestamp: new Date().toISOString() })
 })
 
-// Error handling for the server
-httpServer.on("error", (error) => {
-  console.error("❌ Server error:", error)
-})
-
-// Start the server
 const PORT = process.env.PORT || 5000
-httpServer.listen(PORT, () => {
+
+server.listen(PORT, () => {
   console.log(`🚀 Chat server running on port ${PORT}`)
   console.log(`📡 Socket.IO server ready for connections`)
-  console.log(`🌐 Health check available at http://localhost:${PORT}/health`)
+  console.log(`🌐 CORS enabled for: ${process.env.CLIENT_URL || "http://localhost:3000"}`)
 })
 
 // Graceful shutdown
 process.on("SIGTERM", () => {
-  console.log("🛑 SIGTERM received, shutting down gracefully")
-  httpServer.close(() => {
-    console.log("✅ Server closed")
-    process.exit(0)
-  })
-})
-
-process.on("SIGINT", () => {
-  console.log("🛑 SIGINT received, shutting down gracefully")
-  httpServer.close(() => {
-    console.log("✅ Server closed")
-    process.exit(0)
+  console.log("SIGTERM received, shutting down gracefully")
+  server.close(() => {
+    console.log("Process terminated")
   })
 })
